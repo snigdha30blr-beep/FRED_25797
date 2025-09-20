@@ -1,0 +1,65 @@
+-- Schema for a Performance Management System
+
+--
+-- Table: employees
+-- Stores core employee and manager information.
+-- Using 'employees' instead of 'users' to be more specific to the domain.
+--
+CREATE TABLE employees (
+    employee_id SERIAL PRIMARY KEY,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    role VARCHAR(50) NOT NULL CHECK (role IN ('Manager', 'Employee')),
+    full_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE
+);
+
+---
+-- Table: goals
+-- Manages individual goals assigned by a manager to an employee.
+-- References 'employees' for both manager and employee.
+--
+CREATE TABLE goals (
+    goal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- Use UUIDs for better distributed system compatibility
+    employee_id INTEGER NOT NULL REFERENCES employees(employee_id) ON DELETE CASCADE,
+    manager_id INTEGER NOT NULL REFERENCES employees(employee_id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL, -- Use a title for quick identification
+    description TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL CHECK (status IN ('Draft', 'In Progress', 'Completed', 'Cancelled')),
+    due_date DATE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for faster lookups of goals by employee or manager
+CREATE INDEX idx_goals_employee_id ON goals (employee_id);
+CREATE INDEX idx_goals_manager_id ON goals (manager_id);
+
+---
+-- Table: tasks
+-- Tracks specific, actionable tasks that contribute to a goal.
+--
+CREATE TABLE tasks (
+    task_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- Use UUID for consistency
+    goal_id UUID NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+    assigned_to_id INTEGER NOT NULL REFERENCES employees(employee_id) ON DELETE CASCADE, -- 'assigned_to_id' is clearer than 'employee_id' here
+    description TEXT NOT NULL,
+    is_approved BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_tasks_goal_id ON tasks (goal_id);
+
+---
+-- Table: feedback
+-- Stores written feedback from a manager on a specific goal.
+--
+CREATE TABLE feedback (
+    feedback_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- Use UUID for consistency
+    goal_id UUID NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE,
+    given_by_id INTEGER NOT NULL REFERENCES employees(employee_id) ON DELETE CASCADE, -- 'given_by_id' is more explicit
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_feedback_goal_id ON feedback (goal_id);
