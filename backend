@@ -1,0 +1,310 @@
+# backend.py
+# This file contains all the database connection and business logic for the PMS.
+# It uses psycopg2 to connect to a PostgreSQL database.
+
+import psycopg2
+from datetime import datetime
+from contextlib import contextmanager
+
+# TODO: Replace these with your actual database credentials and configuration.
+# Use environment variables in a real-world application.
+DB_HOST = "localhost"
+DB_NAME = "FRED_ETL"
+DB_USER = "postgres"
+DB_PASSWORD = "Sweety2002"
+
+# --- Database Connection Management ---
+@contextmanager
+def get_db_cursor():
+    """
+    A context manager to handle database connections and cursors.
+    This ensures that connections are always closed and transactions
+    are managed correctly.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        cursor = conn.cursor()
+        yield cursor, conn
+        conn.commit()
+    except psycopg2.DatabaseError as e:
+        print(f"Database error: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+# --- Database Initialization ---
+def setup_database():
+    """Initializes the database tables if they do not exist."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id SERIAL PRIMARY KEY,
+                    username VARCHAR(255) UNIQUE NOT NULL,
+                    role VARCHAR(50) NOT NULL CHECK (role IN ('Manager', 'Employee'))
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goals (
+                    goal_id SERIAL PRIMARY KEY,
+                    employee_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+                    manager_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+                    description TEXT NOT NULL,
+                    due_date DATE NOT NULL,
+                    status VARCHAR(50) NOT NULL CHECK (status IN ('Draft', 'In Progress', 'Completed', 'Cancelled')),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id SERIAL PRIMARY KEY,
+                    goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE,
+                    employee_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+                    description TEXT NOT NULL,
+                    is_approved BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feedback (
+                    feedback_id SERIAL PRIMARY KEY,
+                    goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE,
+                    manager_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+        print("Database setup complete.")
+    except Exception:
+        print("Failed to set up the database.")
+
+
+# --- CRUD Operations for Goals ---
+
+def create_goal(employee_username, manager_username, description, due_date, status='Draft'):
+    """Adds a new goal to the database."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("""
+                INSERT INTO goals (employee_username, manager_username, description, due_date, status)
+                VALUES (%s, %s, %s, %s, %s) RETURNING goal_id;
+            """, (employee_username, manager_username, description, due_date, status))
+            goal_id = cursor.fetchone()[0]
+            print(f"Goal {goal_id} created successfully.")
+            return goal_id
+    except Exception:
+        print("Error creating goal.")
+        return None
+
+def get_goals(username, is_manager):
+    """Retrieves goals for a specific user (employee) or for a manager's team."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            if is_manager:
+                cursor.execute("""
+                    SELECT * FROM goals WHERE manager_username = %s ORDER BY due_date;
+                """, (username,))
+            else:
+                cursor.execute("""
+                    SELECT * FROM goals WHERE employee_username = %s ORDER BY due_date;
+                """, (username,))
+            goals = cursor.fetchall()
+            return goals
+    except Exception:
+        print("Error fetching goals.")
+        return []
+
+def update_goal_status(goal_id, new_status):
+    """Updates the status of a specific goal."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("""
+                UPDATE goals SET status = %s WHERE goal_id = %s;
+            """, (new_status, goal_id))
+        print(f"Goal {goal_id} status updated successfully.")
+        return True
+    except Exception:
+        print("Error updating goal status.")
+        return False
+
+def delete_goal(goal_id):
+    """Deletes a goal and its associated tasks and feedback (handled by CASCADE)."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("DELETE FROM goals WHERE goal_id = %s;", (goal_id,))
+        print(f"Goal {goal_id} deleted successfully.")
+        return True
+    except Exception:
+        print("Error deleting goal.")
+        return False
+
+# --- CRUD Operations for Tasks and Feedback (Combined for efficiency) ---
+def add_task_or_feedback(item_type, goal_id, username, description=None, content=None):
+    """Adds a new task or feedback entry."""
+    if item_type not in ['task', 'feedback']:
+        print("Invalid item type.")
+        return None
+    try:
+        with get_db_cursor() as (cursor, conn):
+            if item_type == 'task':
+                cursor.execute("""
+                    INSERT INTO tasks (goal_id, employee_username, description)
+                    VALUES (%s, %s, %s) RETURNING task_id;
+                """, (goal_id, username, description))
+                item_id = cursor.fetchone()[0]
+                print(f"Task {item_id} created successfully.")
+            elif item_type == 'feedback':
+                cursor.execute("""
+                    INSERT INTO feedback (goal_id, manager_username, content)
+                    VALUES (%s, %s, %s) RETURNING feedback_id;
+                """, (goal_id, username, content))
+                item_id = cursor.fetchone()[0]
+                print(f"Feedback {item_id} created successfully.")
+            return item_id
+    except Exception:
+        print(f"Error creating {item_type}.")
+        return None
+
+# --- Business Insights (Reporting) ---
+def get_business_insights():
+    """Provides key business metrics from the database."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            # Combined query for core metrics
+            cursor.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM goals) AS total_goals,
+                    (SELECT COUNT(*) FROM goals WHERE status = 'Completed') AS completed_goals,
+                    (SELECT AVG(EXTRACT(epoch FROM due_date - created_at)) / 86400 FROM goals WHERE status = 'Completed') AS avg_completion_time_days,
+                    (SELECT COUNT(*) FROM tasks) AS total_tasks,
+                    (SELECT COUNT(*) FROM tasks WHERE is_approved = FALSE) AS unapproved_tasks;
+            """)
+            main_insights = cursor.fetchone()
+
+            cursor.execute("""
+                SELECT employee_username, COUNT(*)
+                FROM goals
+                GROUP BY employee_username
+                ORDER BY COUNT(*) DESC
+                LIMIT 5;
+            """)
+            goals_per_employee = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT g.description, COUNT(t.task_id)
+                FROM goals g
+                LEFT JOIN tasks t ON g.goal_id = t.goal_id
+                GROUP BY g.goal_id, g.description;
+            """)
+            tasks_per_goal = cursor.fetchall()
+
+            insights = {
+                "total_goals": main_insights[0],
+                "completed_goals": main_insights[1],
+                "avg_completion_time_days": main_insights[2],
+                "total_tasks": main_insights[3],
+                "unapproved_tasks": main_insights[4],
+                "goals_per_employee": goals_per_employee,
+                "tasks_per_goal": tasks_per_goal
+            }
+            return insights
+    except Exception:
+        print("Error getting business insights.")
+        return {}
+
+
+# --- User Management ---
+def get_all_users():
+    """Retrieves all users from the database."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("SELECT username, role FROM users;")
+            users = cursor.fetchall()
+            return users
+    except Exception:
+        print("Error fetching users.")
+        return []
+
+def create_user(username, role):
+    """Creates a new user."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            cursor.execute("""
+                INSERT INTO users (username, role) VALUES (%s, %s)
+                ON CONFLICT (username) DO NOTHING;
+            """, (username, role))
+        print(f"User '{username}' created or already exists.")
+        return True
+    except Exception:
+        print("Error creating user.")
+        return False
+
+def get_user_performance_history(username):
+    """Retrieves a comprehensive performance history for a user."""
+    try:
+        with get_db_cursor() as (cursor, conn):
+            # Fetch goals, tasks, and feedback in a single, more efficient query.
+            # This avoids N+1 query problem.
+            cursor.execute("""
+                SELECT
+                    g.goal_id,
+                    g.description,
+                    g.due_date,
+                    g.status,
+                    g.created_at,
+                    ARRAY_AGG(DISTINCT (t.description, t.is_approved)) AS tasks,
+                    ARRAY_AGG(DISTINCT (f.content, f.created_at)) AS feedback
+                FROM goals g
+                LEFT JOIN tasks t ON g.goal_id = t.goal_id
+                LEFT JOIN feedback f ON g.goal_id = f.goal_id
+                WHERE g.employee_username = %s
+                GROUP BY g.goal_id
+                ORDER BY g.created_at DESC;
+            """, (username,))
+            
+            history_data = cursor.fetchall()
+            history = []
+            for item in history_data:
+                goal_id, description, due_date, status, created_at, tasks_raw, feedback_raw = item
+                
+                tasks = []
+                if tasks_raw and tasks_raw != [(None, None)]:
+                    tasks = [{"description": t[0], "approved": t[1]} for t in tasks_raw]
+
+                feedback = []
+                if feedback_raw and feedback_raw != [(None, None)]:
+                    feedback = [{"content": f[0], "created_at": f[1]} for f in feedback_raw]
+                
+                history.append({
+                    "goal_id": goal_id,
+                    "goal_description": description,
+                    "due_date": due_date,
+                    "status": status,
+                    "tasks": tasks,
+                    "feedback": feedback
+                })
+            
+            return history
+    except Exception:
+        print(f"Error fetching performance history for {username}.")
+        return []
